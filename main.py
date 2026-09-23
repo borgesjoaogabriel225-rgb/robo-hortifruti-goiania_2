@@ -1,11 +1,22 @@
 import os
 import re
 import time
+import threading
 from datetime import datetime
+from flask import Flask
 import requests
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import google.generativeai as genai
+
+# ==========================================
+# 0. SERVIDOR WEB PARA ENGANAR O RENDER
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Robô Hortifruti Goiânia rodando perfeitamente!", 200
 
 # ==========================================
 # 1. CONFIGURAÇÕES E CREDENCIAIS
@@ -56,7 +67,6 @@ def raspar_precos_supermercado(supermercado: str) -> str:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
-            # Extrai o texto limpo da página
             return soup.get_text(separator=" ", strip=True)
     except Exception as e:
         print(f"⚠️ Erro ao aceder a {supermercado}: {e}")
@@ -150,5 +160,15 @@ def executar_agente():
         print("⏳ Aguardando 15 minutos para a próxima verificação...")
         time.sleep(900)
 
+# ==========================================
+# INICIALIZAÇÃO DUAL (FLASK + ROBÔ)
+# ==========================================
 if __name__ == "__main__":
-    executar_agente()
+    # Inicia a thread do robô em segundo plano
+    t = threading.Thread(target=executar_agente)
+    t.daemon = True
+    t.start()
+
+    # Inicia o servidor Flask na porta atribuída pelo Render
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
