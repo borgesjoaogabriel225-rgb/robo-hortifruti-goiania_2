@@ -2,24 +2,28 @@ import os
 import re
 import time
 from datetime import datetime
-from playwright.sync_api import sync_playwright
+import requests
+from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import google.generativeai as genai
 
 # ==========================================
-# 1. CONFIGURAÇÃO DE CREDENCIAIS E APIS
+# 1. CONFIGURAÇÕES E CREDENCIAIS
 # ==========================================
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://uytvwuxmemkrdculoawo.supabase.co")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Inicializa o cliente do Supabase com privilégios de escrita
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise ValueError("As variáveis SUPABASE_URL e SUPABASE_SERVICE_KEY precisam estar configuradas.")
+
+# Inicializa o cliente do Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Configura a chave de API da LLM (Gemini / OpenAI)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "SUA_CHAVE_GEMINI_AQUI")
-genai.configure(api_key=GEMINI_API_KEY)
+# Configura a IA Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# Lista oficial das 15 frutas monitoradas
 FRUTAS_ALVO = [
     "Maçã Fuji", "Banana Prata", "Laranja Pêra", "Mamão Formosa", "Melancia",
     "Abacaxi Pérola", "Melão Amarelo", "Pêra Willians", "Manga Palmer", "Uva Thompson",
@@ -29,16 +33,9 @@ FRUTAS_ALVO = [
 SUPERMERCADOS = ["atacadao", "assai", "tatico", "bretas", "carrefour"]
 
 # ==========================================
-# PILAR 1: SCRAPER / RASPAGEM DE DADOS
+# PILAR 1: COLETOR LEVE DE DADOS (HTTP + BS4)
 # ==========================================
-def raspar_precos_supermercado(supermercado: str):
-    """
-    Acessa o site/e-commerce do supermercado via Playwright e captura
-    o texto bruto com os nomes dos produtos e preços listados.
-    """
-    dados_brutos = []
-    
-    # URLs de busca/categoria de hortifrúti dos e-commerces em Goiânia
+def raspar_precos_supermercado(supermercado: str) -> str:
     urls = {
         "atacadao": "https://www.atacadao.com.br/hortifruti/frutas",
         "assai": "https://www.assai.com.br/e-commerce/goiania/frutas",
@@ -51,79 +48,71 @@ def raspar_precos_supermercado(supermercado: str):
     if not url:
         return ""
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        try:
-            page.goto(url, timeout=30000, wait_until="networkidle")
-            # Extrai todo o conteúdo de texto da página contendo produtos e preços
-            texto_pagina = page.inner_text("body")
-            dados_brutos.append(texto_pagina)
-        except Exception as e:
-            print(f"Erro ao acessar {supermercado}: {e}")
-        finally:
-            browser.close()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
-    return "\n".join(dados_brutos)
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            # Extrai o texto limpo da página
+            return soup.get_text(separator=" ", strip=True)
+    except Exception as e:
+        print(f"⚠️ Erro ao aceder a {supermercado}: {e}")
+
+    return ""
 
 # ==========================================
-# PILAR 2: TRATAMENTO E NORMALIZAÇÃO COM IA (LLM)
+# PILAR 2: TRATAMENTO COM IA (GEMINI)
 # ==========================================
 def tratar_dados_com_ia(texto_bruto: str, supermercado: str) -> dict:
-    """
-    O cérebro de IA recebe o texto desestruturado da página, identifica
-    as 15 frutas da nossa cesta, padroniza variações (ex: 'Ban. Prata Kg' -> 'Banana Prata')
-    e extrai o preço numérico do Kg.
-    """
-    prompt = f"""
-    Você é um agente especialista em parsing de dados de supermercados em Goiânia.
-    Abaixo está o texto bruto extraído do e-commerce do supermercado '{supermercado}'.
+    if not texto_bruto or not GEMINI_API_KEY:
+        return {}
 
-    Análise o texto e encontre o preço por Kg ou Unidade das seguintes frutas exatas:
+    prompt = f"""
+    Você é um assistente especialista em extração de preços de e-commerce.
+    Analise o texto bruto extraído do site do supermercado '{supermercado}' em Goiânia.
+
+    Identifique os preços por Kg ou Unidade das seguintes frutas:
     {FRUTAS_ALVO}
 
     Regras:
-    1. Padronize variações de nome para o nome exato da lista acima (ex: 'Banana Prata Selecionada' -> 'Banana Prata').
-    2. Retorne APENAS um objeto JSON válido, onde a chave é o nome exato da fruta e o valor é o preço em float (ex: 5.99).
-    3. Se a fruta não for encontrada no texto, atribua null.
+    1. Retorne ESTRITAMENTE um JSON válido com a fruta e o preço em número float (ex: 5.99).
+    2. Se a fruta não for encontrada, defina o valor como null.
 
-    Texto bruto para análise:
+    Texto:
     ---
-    {texto_bruto[:8000]}
+    {texto_bruto[:6000]}
     ---
     """
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    response = model.generate_content(prompt)
-    
-    import json
     try:
-        # Limpa formatação Markdown do retorno da LLM para extrair o JSON puro
-        json_str = re.sub(r'```json\n|\n```', '', response.text).strip()
-        precos_extraidos = json.loads(json_str)
-        return precos_extraidos
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        json_str = re.sub(r"```json\n|\n```", "", response.text).strip()
+        import json
+        return json.loads(json_str)
     except Exception as e:
-        print(f"Erro no processamento da IA para {supermercado}: {e}")
+        print(f"⚠️ Erro no processamento da IA ({supermercado}): {e}")
         return {}
 
 # ==========================================
-# MÓDULO DE ATUALIZAÇÃO EM TEMPO REAL NO SUPABASE
+# ATUALIZAÇÃO EM TEMPO REAL NO SUPABASE
 # ==========================================
 def atualizar_supabase(dados_por_supermercado: dict):
-    """
-    Compara os preços capturados pela IA com os dados atuais no Supabase.
-    Se houver qualquer alteração de preço, atualiza a tabela imediatamente.
-    """
     hoje = datetime.now().strftime("%Y-%m-%d")
     
-    # Busca os registros atuais no Supabase
-    resposta = supabase.table("precos_hortifruti").select("*").execute()
-    registros_atuais = {row["fruta"]: row for row in resposta.data}
+    try:
+        resposta = supabase.table("precos_hortifruti").select("*").execute()
+        registros_atuais = {row["fruta"]: row for row in resposta.data}
+    except Exception as e:
+        print(f"⚠️ Erro ao consultar o Supabase: {e}")
+        return
 
     for fruta in FRUTAS_ALVO:
         novos_precos = {}
         alteracao_detectada = False
-        
         row_atual = registros_atuais.get(fruta, {})
 
         for mercado in SUPERMERCADOS:
@@ -136,41 +125,30 @@ def atualizar_supabase(dados_por_supermercado: dict):
             elif preco_antigo is not None:
                 novos_precos[mercado] = float(preco_antigo)
 
-        # Atualiza a linha no Supabase apenas se um preço mudou
         if alteracao_detectada:
             novos_precos["data_atualizacao"] = hoje
             supabase.table("precos_hortifruti").update(novos_precos).eq("fruta", fruta).execute()
-            print(f"⚡ [TEMPO REAL] Preço da fruta '{fruta}' atualizado no Supabase!")
+            print(f"⚡ [TEMPO REAL] Preço de '{fruta}' atualizado no Supabase!")
 
 # ==========================================
-# LOOP CONTINUO DE MONITORAMENTO
+# LOOP CONTINUO DE EXECUÇÃO
 # ==========================================
-def executar_agente_autonomo():
-    """
-    Executa a varredura em ciclo contínuo (ex: a cada 15 minutos)
-    garantindo que qualquer mudança de preço seja refletida instantaneamente no App.
-    """
-    print("🚀 Agente Autônomo de Coleta e IA iniciado...")
-    
+def executar_agente():
+    print("🚀 Agente Autônomo Hortifruti Iniciado...")
     while True:
-        print(f"\n[Varredura Iniciada: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}]")
-        resultados_totais = {}
+        print(f"\n[Ciclo iniciado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}]")
+        resultados = {}
 
         for mercado in SUPERMERCADOS:
-            print(f"🔍 Coletando dados de: {mercado.upper()}...")
-            texto_bruto = raspar_precos_supermercado(mercado)
-            
-            if texto_bruto:
-                print(f"🧠 Processando dados com IA para {mercado}...")
-                precos_frutas = tratar_dados_com_ia(texto_bruto, mercado)
-                resultados_totais[mercado] = precos_frutas
+            print(f"🔍 Verificando {mercado.upper()}...")
+            texto = raspar_precos_supermercado(mercado)
+            if texto:
+                precos = tratar_dados_com_ia(texto, mercado)
+                resultados[mercado] = precos
 
-        # Envia para o Supabase
-        atualizar_supabase(resultados_totais)
-        
-        # Intervalo de 15 minutos entre varreduras contínuas
-        print("⏳ Aguardando próximo ciclo de monitoramento...")
+        atualizar_supabase(resultados)
+        print("⏳ Aguardando 15 minutos para a próxima verificação...")
         time.sleep(900)
 
 if __name__ == "__main__":
-    executar_agente_autonomo()
+    executar_agente()
