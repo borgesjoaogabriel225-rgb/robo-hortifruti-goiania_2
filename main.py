@@ -10,7 +10,7 @@ from supabase import create_client, Client
 import google.generativeai as genai
 
 # ==========================================
-# 0. SERVIDOR WEB PARA ENGANAR O RENDER
+# 0. SERVIDOR WEB PARA HEALTH CHECK (RENDER)
 # ==========================================
 app = Flask(__name__)
 
@@ -28,10 +28,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise ValueError("As variáveis SUPABASE_URL e SUPABASE_SERVICE_KEY precisam estar configuradas.")
 
-# Inicializa o cliente do Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Configura a IA Gemini
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -42,6 +40,22 @@ FRUTAS_ALVO = [
 ]
 
 SUPERMERCADOS = ["atacadao", "assai", "tatico", "bretas", "carrefour"]
+
+# ==========================================
+# REGISTRO DE STATUS NO SUPABASE
+# ==========================================
+def registrar_status_supermercado(mercado: str, status: str, qtd_frutas: int = 0, erro: str = None):
+    try:
+        dados = {
+            "supermercado": mercado,
+            "status": status,
+            "ultima_atualizacao": datetime.now().isoformat(),
+            "frutas_encontradas": qtd_frutas,
+            "ultimo_erro": erro
+        }
+        supabase.table("status_supermercados").upsert(dados).execute()
+    except Exception as e:
+        print(f"⚠️ Erro ao registrar status no Supabase para {mercado}: {e}")
 
 # ==========================================
 # PILAR 1: COLETOR LEVE DE DADOS (HTTP + BS4)
@@ -68,8 +82,11 @@ def raspar_precos_supermercado(supermercado: str) -> str:
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             return soup.get_text(separator=" ", strip=True)
+        else:
+            registrar_status_supermercado(supermercado, "Erro HTTP", 0, f"HTTP {response.status_code}")
     except Exception as e:
-        print(f"⚠️ Erro ao aceder a {supermercado}: {e}")
+        print(f"⚠️ Erro ao acessar {supermercado}: {e}")
+        registrar_status_supermercado(supermercado, "Erro Conexão", 0, str(e))
 
     return ""
 
@@ -102,9 +119,15 @@ def tratar_dados_com_ia(texto_bruto: str, supermercado: str) -> dict:
         response = model.generate_content(prompt)
         json_str = re.sub(r"```json\n|\n```", "", response.text).strip()
         import json
-        return json.loads(json_str)
+        resultado = json.loads(json_str)
+        
+        # Conta quantas frutas válidas foram retornadas
+        qtd = sum(1 for v in resultado.values() if v is not None)
+        registrar_status_supermercado(supermercado, "Sucesso", qtd, None)
+        return resultado
     except Exception as e:
         print(f"⚠️ Erro no processamento da IA ({supermercado}): {e}")
+        registrar_status_supermercado(supermercado, "Erro IA", 0, str(e))
         return {}
 
 # ==========================================
@@ -164,11 +187,9 @@ def executar_agente():
 # INICIALIZAÇÃO DUAL (FLASK + ROBÔ)
 # ==========================================
 if __name__ == "__main__":
-    # Inicia a thread do robô em segundo plano
     t = threading.Thread(target=executar_agente)
     t.daemon = True
     t.start()
 
-    # Inicia o servidor Flask na porta atribuída pelo Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
