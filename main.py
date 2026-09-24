@@ -1,8 +1,6 @@
 import os
 import re
-import time
 import json
-import threading
 from datetime import datetime
 from flask import Flask
 import requests
@@ -11,13 +9,17 @@ from supabase import create_client, Client
 import google.generativeai as genai
 
 # ==========================================
-# 0. SERVIDOR WEB PARA HEALTH CHECK (RENDER)
+# 0. SERVIDOR WEB E PAINEL DE CONTROLO
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Robô Hortifruti Goiânia rodando perfeitamente!", 200
+    return """
+    <h2>Robô Hortifruti Goiânia - Modo Sob Demanda</h2>
+    <p>O robô está pronto e em repouso para evitar bloqueios.</p>
+    <p>👉 Para atualizar os preços agora, clique aqui: <a href='/executar' target='_blank'><b>EXECUTAR VARREDURA AGORA</b></a></p>
+    """, 200
 
 # ==========================================
 # 1. CONFIGURAÇÕES E CREDENCIAIS
@@ -59,7 +61,7 @@ def registrar_status_supermercado(mercado: str, status: str, qtd_frutas: int = 0
         print(f"⚠️ Erro ao registrar status no Supabase para {mercado}: {e}")
 
 # ==========================================
-# PILAR 1: COLETOR ROBUSTO DE DADOS
+# PILAR 1: COLETOR DE DADOS
 # ==========================================
 def raspar_precos_supermercado(supermercado: str) -> str:
     urls = {
@@ -76,7 +78,7 @@ def raspar_precos_supermercado(supermercado: str) -> str:
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://www.google.com/"
     }
@@ -133,7 +135,7 @@ def tratar_dados_com_ia(texto_bruto: str, supermercado: str) -> dict:
         return {}
 
 # ==========================================
-# ATUALIZAÇÃO EM TEMPO REAL NO SUPABASE
+# ATUALIZAÇÃO NO SUPABASE
 # ==========================================
 def atualizar_supabase(dados_por_supermercado: dict):
     hoje = datetime.now().strftime("%Y-%m-%d")
@@ -163,35 +165,28 @@ def atualizar_supabase(dados_por_supermercado: dict):
         if alteracao_detectada:
             novos_precos["data_atualizacao"] = hoje
             supabase.table("precos_hortifruti").update(novos_precos).eq("fruta", fruta).execute()
-            print(f"⚡ [TEMPO REAL] Preço de '{fruta}' atualizado no Supabase!")
 
 # ==========================================
-# LOOP CONTINUO DE EXECUÇÃO
+# ROTA DE EXECUÇÃO MANUAL (SOB DEMANDA)
 # ==========================================
-def executar_agente():
-    print("🚀 Agente Autônomo Hortifruti Iniciado...")
-    while True:
-        print(f"\n[Ciclo iniciado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}]")
-        resultados = {}
+@app.route('/executar')
+def disparar_robo():
+    print("🚀 Varredura manual iniciada...")
+    resultados = {}
 
-        for mercado in SUPERMERCADOS:
-            print(f"🔍 Verificando {mercado.upper()}...")
-            texto = raspar_precos_supermercado(mercado)
-            if texto:
-                precos = tratar_dados_com_ia(texto, mercado)
-                resultados[mercado] = precos
+    for mercado in SUPERMERCADOS:
+        print(f"🔍 Verificando {mercado.upper()}...")
+        texto = raspar_precos_supermercado(mercado)
+        if texto:
+            precos = tratar_dados_com_ia(texto, mercado)
+            resultados[mercado] = precos
 
-        atualizar_supabase(resultados)
-        print("⏳ Aguardando 15 minutos para a próxima verificação...")
-        time.sleep(900)
+    atualizar_supabase(resultados)
+    return "<h3>Varredura concluída com sucesso! Os dados foram enviados ao Supabase. Pode fechar esta página.</h3>", 200
 
 # ==========================================
-# INICIALIZAÇÃO DUAL (FLASK + ROBÔ)
+# INICIALIZAÇÃO DO SERVIDOR WEB
 # ==========================================
 if __name__ == "__main__":
-    t = threading.Thread(target=executar_agente)
-    t.daemon = True
-    t.start()
-
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
