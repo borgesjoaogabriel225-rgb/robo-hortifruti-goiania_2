@@ -1,7 +1,7 @@
 import os
 import re
 import time
-import threading
+import json
 from datetime import datetime
 from flask import Flask
 import requests
@@ -58,7 +58,7 @@ def registrar_status_supermercado(mercado: str, status: str, qtd_frutas: int = 0
         print(f"⚠️ Erro ao registrar status no Supabase para {mercado}: {e}")
 
 # ==========================================
-# PILAR 1: COLETOR LEVE DE DADOS (HTTP + BS4)
+# PILAR 1: COLETOR ROBUSTO DE DADOS
 # ==========================================
 def raspar_precos_supermercado(supermercado: str) -> str:
     urls = {
@@ -74,11 +74,14 @@ def raspar_precos_supermercado(supermercado: str) -> str:
         return ""
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.google.com/"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=20)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             return soup.get_text(separator=" ", strip=True)
@@ -118,10 +121,8 @@ def tratar_dados_com_ia(texto_bruto: str, supermercado: str) -> dict:
         model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(prompt)
         json_str = re.sub(r"```json\n|\n```", "", response.text).strip()
-        import json
         resultado = json.loads(json_str)
         
-        # Conta quantas frutas válidas foram retornadas
         qtd = sum(1 for v in resultado.values() if v is not None)
         registrar_status_supermercado(supermercado, "Sucesso", qtd, None)
         return resultado
