@@ -121,7 +121,7 @@ def tratar_dados_com_ia(texto_bruto: str, supermercado: str) -> dict:
     """
 
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
         json_str = re.sub(r"```json\n|\n```", "", response.text).strip()
         resultado = json.loads(json_str)
